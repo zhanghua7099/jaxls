@@ -6,6 +6,7 @@ from functools import partial
 
 import jax
 import termcolor
+from jax import numpy as jnp
 from loguru import logger
 
 
@@ -30,6 +31,7 @@ def jax_log(fmt: Any, *args, **kwargs) -> Any:
 def print_deprecation_warning(
     message0: Any, message1: Any = None, stack_level: Any = 2
 ) -> Any:
+
     frame = inspect.currentframe()
     for _ in range(stack_level):
         if not frame:
@@ -91,3 +93,33 @@ def print_deprecation_warning(
             expand=False,
         )
     )
+
+
+def irls_huber(delta: Any = 1.0) -> Any:
+    def weight_fn(residual: Any) -> Any:
+        abs_r = jnp.abs(residual)
+        return jnp.where(abs_r <= delta, jnp.ones_like(abs_r), delta / (abs_r + 1e-10))
+
+    return weight_fn
+
+
+def irls_cauchy(c: Any = 1.0) -> Any:
+    def weight_fn(residual: Any) -> Any:
+        return 1.0 / (1.0 + (residual / c) ** 2)
+
+    return weight_fn
+
+
+def irls_tukey(c: Any = 4.685) -> Any:
+    def weight_fn(residual: Any) -> Any:
+        u = residual / c
+        return jnp.where(jnp.abs(u) <= 1.0, (1.0 - u**2) ** 2, jnp.zeros_like(u))
+
+    return weight_fn
+
+
+def irls_l1(eps: Any = 1e-6) -> Any:
+    def weight_fn(residual: Any) -> Any:
+        return 1.0 / (jnp.abs(residual) + eps)
+
+    return weight_fn

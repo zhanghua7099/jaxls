@@ -2,10 +2,11 @@ import contextlib
 import inspect
 import time
 from functools import partial
-from typing import Generator
+from typing import Callable, Generator
 
 import jax
 import termcolor
+from jax import numpy as jnp
 from loguru import logger
 
 
@@ -110,3 +111,118 @@ def print_deprecation_warning(
             expand=False,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# IRLS weight factory functions
+# ---------------------------------------------------------------------------
+
+
+def irls_huber(delta: float = 1.0) -> Callable[[jax.Array], jax.Array]:
+    """Return a Huber IRLS weight function.
+
+    Produces weights that correspond to the Huber M-estimator loss:
+
+    .. math::
+
+        w_i = \\begin{cases}1 & |r_i| \\le \\delta \\\\ \\delta / |r_i| & |r_i| > \\delta\\end{cases}
+
+    This gives a smooth transition between L2 (small residuals) and L1
+    (large residuals) behaviour, making the solver robust to outliers while
+    maintaining quadratic convergence near the optimum.
+
+    Args:
+        delta: Threshold that separates the quadratic and linear regimes.
+            Residuals with ``|r| <= delta`` receive weight 1; larger residuals
+            are down-weighted proportionally.  Default is ``1.0``.
+
+    Returns:
+        A callable ``weight_fn(residual) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residual: jax.Array) -> jax.Array:
+        abs_r = jnp.abs(residual)
+        return jnp.where(abs_r <= delta, jnp.ones_like(abs_r), delta / (abs_r + 1e-10))
+
+    return weight_fn
+
+
+def irls_cauchy(c: float = 1.0) -> Callable[[jax.Array], jax.Array]:
+    """Return a Cauchy (Lorentzian) IRLS weight function.
+
+    Produces weights corresponding to the Cauchy M-estimator loss
+    ``\\rho(r) = c^2 / 2 * log(1 + (r/c)^2)``:
+
+    .. math::
+
+        w_i = \\frac{1}{1 + (r_i / c)^2}
+
+    The Cauchy estimator is more aggressive than Huber at down-weighting
+    large residuals (sub-linear growth), giving stronger outlier rejection
+    but potentially slower convergence.
+
+    Args:
+        c: Scale parameter.  Residuals much larger than ``c`` are strongly
+            down-weighted.  Default is ``1.0``.
+
+    Returns:
+        A callable ``weight_fn(residual) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residual: jax.Array) -> jax.Array:
+        return 1.0 / (1.0 + (residual / c) ** 2)
+
+    return weight_fn
+
+
+def irls_tukey(c: float = 4.685) -> Callable[[jax.Array], jax.Array]:
+    """Return a Tukey bisquare IRLS weight function.
+
+    Produces weights corresponding to the Tukey bisquare M-estimator:
+
+    .. math::
+
+        w_i = \\begin{cases}(1 - (r_i/c)^2)^2 & |r_i| \\le c \\\\ 0 & |r_i| > c\\end{cases}
+
+    Residuals beyond the threshold ``c`` receive *zero* weight and are
+    completely ignored.  This gives the strongest outlier rejection of the
+    built-in estimators, but can cause instability if the initial estimate is
+    poor (convergence to the correct solution is not guaranteed).
+
+    Args:
+        c: Threshold beyond which residuals are ignored.  The default value
+            of ``4.685`` gives 95 % efficiency under Gaussian noise.
+
+    Returns:
+        A callable ``weight_fn(residual) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residual: jax.Array) -> jax.Array:
+        u = residual / c
+        return jnp.where(jnp.abs(u) <= 1.0, (1.0 - u ** 2) ** 2, jnp.zeros_like(u))
+
+    return weight_fn
+
+
+def irls_l1(eps: float = 1e-6) -> Callable[[jax.Array], jax.Array]:
+    """Return an L1-norm IRLS weight function.
+
+    Produces weights that convert a least-squares solver into an approximate
+    L1 minimiser:
+
+    .. math::
+
+        w_i = \\frac{1}{|r_i| + \\varepsilon}
+
+    Args:
+        eps: Small positive constant for numerical stability near zero.
+            Default is ``1e-6``.
+
+    Returns:
+        A callable ``weight_fn(residual) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residual: jax.Array) -> jax.Array:
+        return 1.0 / (jnp.abs(residual) + eps)
+
+    return weight_fn

@@ -38,6 +38,8 @@ class _CostInfo:
 
     jac_cache: Any
 
+    irls_weights: Any
+
 
 def _get_function_signature(func: Any) -> Any:
     closure = getattr(func, "__closure__", None)
@@ -81,6 +83,7 @@ class LeastSquaresProblem:
         )
 
     def analyze(self, use_onp: Any = False) -> Any:
+
         if use_onp:
             jnp = onp
         else:
@@ -360,6 +363,7 @@ class AnalyzedLeastSquaresProblem:
     def _compute_cost_info(self, vals: Any) -> Any:
         residual_vectors: Any = []
         jac_caches: Any = []
+        irls_weights_list: Any = []
         cost_nonconstraint = jnp.array(0.0)
 
         for stacked_cost in self._stacked_costs:
@@ -369,12 +373,22 @@ class AnalyzedLeastSquaresProblem:
 
             if isinstance(compute_residual_out, tuple):
                 assert len(compute_residual_out) == 2
-                residual = compute_residual_out[0].reshape((-1,))
+                residual_2d = compute_residual_out[0]
                 jac_caches.append(compute_residual_out[1])
             else:
                 assert len(compute_residual_out.shape) == 2
-                residual = compute_residual_out.reshape((-1,))
+                residual_2d = compute_residual_out
                 jac_caches.append(None)
+
+            if stacked_cost.irls_weight_fn is not None:
+                weights_2d = jax.vmap(stacked_cost.irls_weight_fn)(residual_2d)
+                weights = weights_2d.reshape((-1,))
+                irls_weights_list.append(weights)
+
+                residual = jnp.sqrt(weights) * residual_2d.reshape((-1,))
+            else:
+                irls_weights_list.append(None)
+                residual = residual_2d.reshape((-1,))
 
             residual_vectors.append(residual)
 
@@ -390,6 +404,7 @@ class AnalyzedLeastSquaresProblem:
             cost_total=cost_total,
             cost_nonconstraint=cost_nonconstraint,
             jac_cache=tuple(jac_caches),
+            irls_weights=tuple(irls_weights_list),
         )
 
     def _compute_constraint_values(self, vals: Any) -> Any:
@@ -414,7 +429,12 @@ class AnalyzedLeastSquaresProblem:
 
         return jnp.concatenate([c.reshape(-1) for c in constraint_slices], axis=0)
 
-    def _compute_jac_values(self, vals: Any, jac_cache: Any) -> Any:
+    def _compute_jac_values(
+        self,
+        vals: Any,
+        jac_cache: Any,
+        irls_weights: Any = None,
+    ) -> Any:
         block_rows = list()
         residual_offset = 0
 
@@ -474,6 +494,12 @@ class AnalyzedLeastSquaresProblem:
                 cost.residual_flat_dim,
                 stacked_jac.shape[-1],
             )
+
+            if irls_weights is not None and irls_weights[i] is not None:
+                sqrt_w = jnp.sqrt(irls_weights[i]).reshape(
+                    num_costs, cost.residual_flat_dim
+                )
+                stacked_jac = stacked_jac * sqrt_w[:, :, None]
 
             stacked_jac_start_col = 0
             start_cols = list()

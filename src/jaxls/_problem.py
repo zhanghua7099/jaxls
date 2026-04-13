@@ -64,6 +64,16 @@ class _CostInfo:
     jac_cache: tuple[Any, ...]
     """Jacobian cache from residual computation, used for custom Jacobian functions."""
 
+    irls_weights: tuple[jax.Array | None, ...]
+    """Per-group IRLS weight arrays (None when no irls_weight_fn is set).
+
+    Each entry corresponds to a cost group in ``_stacked_costs``.  When
+    present, the array has shape ``(count * residual_flat_dim,)`` and contains
+    the **raw** (unscaled) weights ``w_i``; the solver applies
+    ``sqrt(w_i)`` to both the residual and the Jacobian rows so that the
+    effective objective is ``sum_i w_i * r_i^2``.
+    """
+
 
 def _get_function_signature(func: Callable) -> Hashable:
     """Returns a hashable value that should be equal for equivalent input functions.
@@ -539,6 +549,7 @@ class AnalyzedLeastSquaresProblem:
         """
         residual_vectors: list[jax.Array] = []
         jac_caches: list[Any] = []
+        irls_weights_list: list[jax.Array | None] = []
         cost_nonconstraint = jnp.array(0.0)
 
         for stacked_cost in self._stacked_costs:
@@ -549,12 +560,26 @@ class AnalyzedLeastSquaresProblem:
 
             if isinstance(compute_residual_out, tuple):
                 assert len(compute_residual_out) == 2
-                residual = compute_residual_out[0].reshape((-1,))
+                residual_2d = compute_residual_out[0]  # (count, residual_flat_dim)
                 jac_caches.append(compute_residual_out[1])
             else:
                 assert len(compute_residual_out.shape) == 2
-                residual = compute_residual_out.reshape((-1,))
+                residual_2d = compute_residual_out  # (count, residual_flat_dim)
                 jac_caches.append(None)
+
+            # Apply IRLS weights if specified.
+            if stacked_cost.irls_weight_fn is not None:
+                # Vmap the weight function over the batch of cost instances.
+                weights_2d = jax.vmap(stacked_cost.irls_weight_fn)(
+                    residual_2d
+                )  # (count, residual_flat_dim)
+                weights = weights_2d.reshape((-1,))  # (count * residual_flat_dim,)
+                irls_weights_list.append(weights)
+                # Scale the residual: r_irls = sqrt(w) * r
+                residual = jnp.sqrt(weights) * residual_2d.reshape((-1,))
+            else:
+                irls_weights_list.append(None)
+                residual = residual_2d.reshape((-1,))
 
             residual_vectors.append(residual)
 
@@ -571,6 +596,7 @@ class AnalyzedLeastSquaresProblem:
             cost_total=cost_total,
             cost_nonconstraint=cost_nonconstraint,
             jac_cache=tuple(jac_caches),
+            irls_weights=tuple(irls_weights_list),
         )
 
     def _compute_constraint_values(self, vals: VarValues) -> tuple[jax.Array, ...]:
@@ -611,7 +637,10 @@ class AnalyzedLeastSquaresProblem:
         return jnp.concatenate([c.reshape(-1) for c in constraint_slices], axis=0)
 
     def _compute_jac_values(
-        self, vals: VarValues, jac_cache: tuple[CustomJacobianCache, ...]
+        self,
+        vals: VarValues,
+        jac_cache: tuple[CustomJacobianCache, ...],
+        irls_weights: tuple[jax.Array | None, ...] | None = None,
     ) -> BlockRowSparseMatrix:
         """Compute Jacobian values in block-row sparse format.
 
@@ -627,6 +656,11 @@ class AnalyzedLeastSquaresProblem:
             vals: Variable values at which to evaluate the Jacobian.
             jac_cache: Cached values from residual computation, used by custom
                 Jacobian functions. One entry per cost group (None if no cache).
+            irls_weights: Optional per-group IRLS weight arrays from
+                ``_compute_cost_info``.  When an entry is not None the
+                corresponding Jacobian rows are scaled by ``sqrt(w_i)`` so that
+                the normal equations implement the weighted objective
+                ``sum_i w_i * r_i^2``.
 
         Returns:
             BlockRowSparseMatrix containing the full Jacobian with shape
@@ -699,6 +733,14 @@ class AnalyzedLeastSquaresProblem:
                 cost.residual_flat_dim,
                 stacked_jac.shape[-1],  # Tangent dimension.
             )
+
+            # Apply IRLS weights to Jacobian rows: J_irls = diag(sqrt(w)) @ J.
+            if irls_weights is not None and irls_weights[i] is not None:
+                sqrt_w = jnp.sqrt(irls_weights[i]).reshape(
+                    num_costs, cost.residual_flat_dim
+                )  # (num_costs, residual_flat_dim)
+                stacked_jac = stacked_jac * sqrt_w[:, :, None]
+
             # Compute block-row representation for sparse Jacobian.
             stacked_jac_start_col = 0
             start_cols = list[jax.Array]()

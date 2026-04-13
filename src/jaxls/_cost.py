@@ -129,6 +129,31 @@ class Cost[*Args]:
     """Optional custom Jacobian function. The same as `jac_custom_fn`, but
     should be used when `compute_residual` returns a tuple with cache."""
 
+    irls_weight_fn: jdc.Static[Callable[[jax.Array], jax.Array] | None] = None
+    """Optional IRLS (Iteratively Reweighted Least Squares) weight function.
+
+    If provided, this function is called at each solver iteration with the
+    current per-instance residual vector and should return per-element
+    non-negative weights. The solver then minimizes the *weighted* squared
+    residuals ``sum_i w_i * r_i^2`` rather than the unweighted sum.
+
+    Signature::
+
+        weight_fn(residual: jax.Array) -> jax.Array
+
+    where ``residual`` has shape ``(residual_dim,)`` (for a single cost
+    instance) and the returned array has the same shape with non-negative
+    values.  The function is automatically vmapped over batched cost groups.
+
+    Built-in factory functions for common M-estimators can be found in
+    :mod:`jaxls.utils`:
+
+    - :func:`~jaxls.utils.irls_huber`
+    - :func:`~jaxls.utils.irls_cauchy`
+    - :func:`~jaxls.utils.irls_tukey`
+    - :func:`~jaxls.utils.irls_l1`
+    """
+
     name: jdc.Static[str | None] = None
     """Custom name for debugging and logging."""
 
@@ -257,6 +282,7 @@ class Cost[*Args]:
         jac_batch_size: int | None = None,
         jac_custom_fn: JacobianFunc[Args_] | None = None,
         jac_custom_with_cache_fn: JacobianFuncWithCache[Args_, Any] | None = None,
+        irls_weight_fn: Callable[[jax.Array], jax.Array] | None = None,
         name: str | None = None,
     ) -> (
         Callable[[ResidualFunc[Args_]], CostFactory[Args_]]
@@ -275,6 +301,8 @@ class Cost[*Args]:
                 or ``"reverse"``).
             jac_batch_size: Batch size for Jacobian computation. Set to 1 to
                 reduce memory usage.
+            irls_weight_fn: Optional IRLS weight function. See
+                :attr:`~jaxls.Cost.irls_weight_fn` for details.
         """
 
         def decorator(
@@ -306,6 +334,7 @@ class Cost[*Args]:
                     )
                     if jac_custom_with_cache_fn is not None
                     else None,
+                    irls_weight_fn=irls_weight_fn,
                     name=name if name is not None else compute_residual.__name__,
                 )
 
