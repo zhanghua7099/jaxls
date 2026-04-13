@@ -118,7 +118,7 @@ def print_deprecation_warning(
 # ---------------------------------------------------------------------------
 
 
-def irls_huber(delta: float = 1.0) -> Callable[[jax.Array], jax.Array]:
+def irls_huber(delta: float = 1.0, eps: float = 1e-10) -> Callable[[jax.Array], jax.Array]:
     """Return a Huber IRLS weight function.
 
     Produces weights that correspond to the Huber M-estimator loss:
@@ -135,6 +135,8 @@ def irls_huber(delta: float = 1.0) -> Callable[[jax.Array], jax.Array]:
         delta: Threshold that separates the quadratic and linear regimes.
             Residuals with ``|r| <= delta`` receive weight 1; larger residuals
             are down-weighted proportionally.  Default is ``1.0``.
+        eps: Small positive constant added to the denominator for numerical
+            stability.  Default is ``1e-10``.
 
     Returns:
         A callable ``weight_fn(residual) -> weights`` suitable for
@@ -142,7 +144,7 @@ def irls_huber(delta: float = 1.0) -> Callable[[jax.Array], jax.Array]:
     """
     def weight_fn(residual: jax.Array) -> jax.Array:
         abs_r = jnp.abs(residual)
-        return jnp.where(abs_r <= delta, jnp.ones_like(abs_r), delta / (abs_r + 1e-10))
+        return jnp.where(abs_r <= delta, jnp.ones_like(abs_r), delta / (abs_r + eps))
 
     return weight_fn
 

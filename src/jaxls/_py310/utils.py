@@ -95,10 +95,10 @@ def print_deprecation_warning(
     )
 
 
-def irls_huber(delta: Any = 1.0) -> Any:
+def irls_huber(delta: Any = 1.0, eps: Any = 1e-10) -> Any:
     def weight_fn(residual: Any) -> Any:
         abs_r = jnp.abs(residual)
-        return jnp.where(abs_r <= delta, jnp.ones_like(abs_r), delta / (abs_r + 1e-10))
+        return jnp.where(abs_r <= delta, jnp.ones_like(abs_r), delta / (abs_r + eps))
 
     return weight_fn
 
