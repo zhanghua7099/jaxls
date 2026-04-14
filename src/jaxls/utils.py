@@ -2,10 +2,11 @@ import contextlib
 import inspect
 import time
 from functools import partial
-from typing import Generator
+from typing import Callable, Generator
 
 import jax
 import termcolor
+from jax import numpy as jnp
 from loguru import logger
 
 
@@ -110,3 +111,300 @@ def print_deprecation_warning(
             expand=False,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# IRLS weight factory functions
+# ---------------------------------------------------------------------------
+
+# Consistency constant: for X ~ N(0,1), E[|X|] = median(|X|) / 0.6745.
+_MAD_CONSISTENCY_FACTOR = 0.6745
+
+
+def irls_huber(delta: float = 1.0, eps: float = 1e-10) -> Callable[[jax.Array], jax.Array]:
+    """Return a Huber IRLS weight function with a **fixed** scale threshold.
+
+    Produces weights that correspond to the Huber M-estimator loss:
+
+    .. math::
+
+        w_i = \\begin{cases}1 & |r_i| \\le \\delta \\\\ \\delta / |r_i| & |r_i| > \\delta\\end{cases}
+
+    This gives a smooth transition between L2 (small residuals) and L1
+    (large residuals) behaviour, making the solver robust to outliers while
+    maintaining quadratic convergence near the optimum.
+
+    .. note::
+
+        The threshold ``delta`` is an absolute value in the same units as the
+        residuals.  If you want to let the solver estimate the noise scale
+        automatically from the data at each iteration, use
+        :func:`irls_huber_adaptive` instead.
+
+    Args:
+        delta: Threshold that separates the quadratic and linear regimes.
+            Residuals with ``|r| <= delta`` receive weight 1; larger residuals
+            are down-weighted proportionally.  Default is ``1.0``.
+        eps: Small positive constant added to the denominator for numerical
+            stability.  Default is ``1e-10``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.  ``residuals`` has shape
+        ``(count, residual_flat_dim)``; ``weights`` has the same shape.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        def _per_instance(r: jax.Array) -> jax.Array:
+            abs_r = jnp.abs(r)
+            return jnp.where(abs_r <= delta, jnp.ones_like(abs_r), delta / (abs_r + eps))
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_cauchy(c: float = 1.0) -> Callable[[jax.Array], jax.Array]:
+    """Return a Cauchy (Lorentzian) IRLS weight function with a **fixed** scale.
+
+    Produces weights corresponding to the Cauchy M-estimator loss
+    ``\\rho(r) = c^2 / 2 * log(1 + (r/c)^2)``:
+
+    .. math::
+
+        w_i = \\frac{1}{1 + (r_i / c)^2}
+
+    The Cauchy estimator is more aggressive than Huber at down-weighting
+    large residuals (sub-linear growth), giving stronger outlier rejection
+    but potentially slower convergence.
+
+    .. note::
+
+        ``c`` is an absolute scale value.  See :func:`irls_cauchy_adaptive`
+        for automatic scale estimation from the data.
+
+    Args:
+        c: Scale parameter.  Residuals much larger than ``c`` are strongly
+            down-weighted.  Default is ``1.0``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        def _per_instance(r: jax.Array) -> jax.Array:
+            return 1.0 / (1.0 + (r / c) ** 2)
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_tukey(c: float = 4.685) -> Callable[[jax.Array], jax.Array]:
+    """Return a Tukey bisquare IRLS weight function with a **fixed** scale.
+
+    Produces weights corresponding to the Tukey bisquare M-estimator:
+
+    .. math::
+
+        w_i = \\begin{cases}(1 - (r_i/c)^2)^2 & |r_i| \\le c \\\\ 0 & |r_i| > c\\end{cases}
+
+    Residuals beyond the threshold ``c`` receive *zero* weight and are
+    completely ignored.  This gives the strongest outlier rejection of the
+    built-in estimators, but can cause instability if the initial estimate is
+    poor (convergence to the correct solution is not guaranteed).
+
+    .. note::
+
+        ``c`` is an absolute scale value.  See :func:`irls_tukey_adaptive`
+        for automatic scale estimation from the data.
+
+    Args:
+        c: Threshold beyond which residuals are ignored.  The default value
+            of ``4.685`` gives 95 % efficiency under Gaussian noise when the
+            true noise standard deviation equals 1.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        def _per_instance(r: jax.Array) -> jax.Array:
+            u = r / c
+            return jnp.where(jnp.abs(u) <= 1.0, (1.0 - u ** 2) ** 2, jnp.zeros_like(u))
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_l1(eps: float = 1e-6) -> Callable[[jax.Array], jax.Array]:
+    """Return an L1-norm IRLS weight function.
+
+    Produces weights that convert a least-squares solver into an approximate
+    L1 minimiser:
+
+    .. math::
+
+        w_i = \\frac{1}{|r_i| + \\varepsilon}
+
+    Args:
+        eps: Small positive constant for numerical stability near zero.
+            Default is ``1e-6``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        def _per_instance(r: jax.Array) -> jax.Array:
+            return 1.0 / (jnp.abs(r) + eps)
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+# ---------------------------------------------------------------------------
+# Adaptive-scale IRLS weight factories
+#
+# These factories estimate the noise scale σ from the current residuals at
+# every solver iteration using the Median Absolute Deviation (MAD):
+#
+#     σ = median(|r|) / 0.6745
+#
+# The 0.6745 factor makes the estimator consistent for Gaussian noise
+# (i.e. E[MAD] = 0.6745 σ when r ~ N(0,σ²)).  The scale-normalised
+# residual u = r / σ is then used in the weight formula, so the effective
+# threshold adapts to the data spread rather than being fixed a priori.
+# ---------------------------------------------------------------------------
+
+
+def irls_huber_adaptive(
+    k: float = 1.345, eps: float = 1e-10
+) -> Callable[[jax.Array], jax.Array]:
+    """Return a Huber IRLS weight function with **adaptive** scale estimation.
+
+    At each solver iteration the noise scale σ is estimated from the current
+    residuals using the Median Absolute Deviation (MAD):
+
+    .. math::
+
+        \\hat{\\sigma} = \\frac{\\operatorname{median}(|r|)}{0.6745}
+
+    The weights are then computed using the scale-normalised residuals
+    ``u = r / σ``:
+
+    .. math::
+
+        w_i = \\begin{cases}1 & |u_i| \\le k \\\\ k / |u_i| & |u_i| > k\\end{cases}
+
+    The default ``k = 1.345`` gives 95 % asymptotic efficiency relative to
+    the ordinary least-squares estimator under Gaussian noise.
+
+    Args:
+        k: Tuning constant (multiples of σ).  Default is ``1.345``.
+        eps: Small positive constant added to the denominator for numerical
+            stability.  Default is ``1e-10``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.  ``residuals`` has shape
+        ``(count, residual_flat_dim)``; ``weights`` has the same shape.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        # Estimate sigma from all residuals in the group.
+        sigma = jnp.median(jnp.abs(residuals.flatten())) / _MAD_CONSISTENCY_FACTOR
+        sigma = jnp.maximum(sigma, eps)
+
+        def _per_instance(r: jax.Array) -> jax.Array:
+            u = jnp.abs(r) / sigma
+            return jnp.where(u <= k, jnp.ones_like(u), k / (u + eps))
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_cauchy_adaptive(
+    k: float = 2.385, eps: float = 1e-10
+) -> Callable[[jax.Array], jax.Array]:
+    """Return a Cauchy IRLS weight function with **adaptive** scale estimation.
+
+    At each solver iteration the noise scale σ is estimated via MAD:
+
+    .. math::
+
+        \\hat{\\sigma} = \\frac{\\operatorname{median}(|r|)}{0.6745}
+
+    Weights are computed from scale-normalised residuals ``u = r / σ``:
+
+    .. math::
+
+        w_i = \\frac{1}{1 + (u_i / k)^2}
+
+    The default ``k = 2.385`` gives 95 % asymptotic efficiency under
+    Gaussian noise.
+
+    Args:
+        k: Tuning constant (multiples of σ).  Default is ``2.385``.
+        eps: Small constant for numerical stability in σ estimation.
+            Default is ``1e-10``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        sigma = jnp.median(jnp.abs(residuals.flatten())) / _MAD_CONSISTENCY_FACTOR
+        sigma = jnp.maximum(sigma, eps)
+
+        def _per_instance(r: jax.Array) -> jax.Array:
+            u = r / sigma
+            return 1.0 / (1.0 + (u / k) ** 2)
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_tukey_adaptive(
+    k: float = 4.685, eps: float = 1e-10
+) -> Callable[[jax.Array], jax.Array]:
+    """Return a Tukey bisquare IRLS weight function with **adaptive** scale estimation.
+
+    At each solver iteration the noise scale σ is estimated via MAD:
+
+    .. math::
+
+        \\hat{\\sigma} = \\frac{\\operatorname{median}(|r|)}{0.6745}
+
+    Weights are computed from scale-normalised residuals ``u = r / σ``:
+
+    .. math::
+
+        w_i = \\begin{cases}(1 - (u_i / k)^2)^2 & |u_i| \\le k \\\\ 0 & |u_i| > k\\end{cases}
+
+    The default ``k = 4.685`` gives 95 % asymptotic efficiency under
+    Gaussian noise.  Residuals with ``|r| > k * σ`` are completely excluded.
+
+    Args:
+        k: Tuning constant (multiples of σ).  Default is ``4.685``.
+        eps: Small constant for numerical stability in σ estimation.
+            Default is ``1e-10``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        sigma = jnp.median(jnp.abs(residuals.flatten())) / _MAD_CONSISTENCY_FACTOR
+        sigma = jnp.maximum(sigma, eps)
+
+        def _per_instance(r: jax.Array) -> jax.Array:
+            u = r / sigma
+            t = u / k
+            return jnp.where(jnp.abs(t) <= 1.0, (1.0 - t ** 2) ** 2, jnp.zeros_like(t))
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn

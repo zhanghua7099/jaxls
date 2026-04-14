@@ -142,6 +142,7 @@ class _AnalyzedCost[*Args](Cost[*Args]):
             jac_batch_size=cost.jac_batch_size,
             jac_custom_fn=cost.jac_custom_fn,
             jac_custom_with_cache_fn=cost.jac_custom_with_cache_fn,
+            irls_weight_fn=cost.irls_weight_fn,
             name=cost.name,
             num_variables=len(variables),
             sorted_ids_from_var_type=sort_and_stack_vars(variables),

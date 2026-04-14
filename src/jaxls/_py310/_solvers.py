@@ -237,6 +237,7 @@ class NonlinearSolver:
         if self.termination.early_termination:
 
             def should_continue(state: Any) -> Any:
+
                 basic_checks = ~jnp.isnan(state.solution.cost_info.cost_total) & (
                     state.summary.iterations < self.termination.max_iterations
                 )
@@ -294,6 +295,7 @@ class NonlinearSolver:
         AT_multiply: Any,
         ATb: Any,
     ) -> Any:
+
         if self.trust_region is not None:
             lambd = jnp.minimum(
                 inner_state.lambd * self.trust_region.lambda_factor,
@@ -411,7 +413,9 @@ class NonlinearSolver:
             problem = update_problem_al_params(problem, state.al_state)
 
         A_blocksparse = problem._compute_jac_values(
-            sol_prev.vals, sol_prev.cost_info.jac_cache
+            sol_prev.vals,
+            sol_prev.cost_info.jac_cache,
+            sol_prev.cost_info.irls_weights,
         )
 
         with jdc.copy_and_mutate(state, validate=False) as state:
@@ -634,6 +638,7 @@ class TerminationConfig:
         ATb: Any,
         iterations: Any,
     ) -> Any:
+
         cost_reldelta = (
             jnp.abs(cost_nonconstraint_updated - sol_prev.cost_info.cost_nonconstraint)
             / sol_prev.cost_info.cost_nonconstraint

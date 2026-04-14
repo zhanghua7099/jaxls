@@ -29,6 +29,8 @@ class Cost:
 
     jac_custom_with_cache_fn: jdc.Static[Any] = None
 
+    irls_weight_fn: jdc.Static[Any] = None
+
     name: jdc.Static[Any] = None
 
     def _get_name(self) -> Any:
@@ -95,8 +97,10 @@ class Cost:
         jac_batch_size: Any = None,
         jac_custom_fn: Any = None,
         jac_custom_with_cache_fn: Any = None,
+        irls_weight_fn: Any = None,
         name: Any = None,
     ) -> Any:
+
         def decorator(
             compute_residual: Any,
         ) -> Any:
@@ -123,6 +127,7 @@ class Cost:
                     )
                     if jac_custom_with_cache_fn is not None
                     else None,
+                    irls_weight_fn=irls_weight_fn,
                     name=name if name is not None else compute_residual.__name__,
                 )
 
