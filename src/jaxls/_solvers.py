@@ -532,7 +532,9 @@ class NonlinearSolver:
 
         # Get nonzero values of Jacobian.
         A_blocksparse = problem._compute_jac_values(
-            sol_prev.vals, sol_prev.cost_info.jac_cache
+            sol_prev.vals,
+            sol_prev.cost_info.jac_cache,
+            sol_prev.cost_info.irls_weights,
         )
 
         # Compute Jacobian scaler on first iteration only. We use jnp.where to
