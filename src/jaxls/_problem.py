@@ -569,8 +569,9 @@ class AnalyzedLeastSquaresProblem:
 
             # Apply IRLS weights if specified.
             if stacked_cost.irls_weight_fn is not None:
-                # Vmap the weight function over the batch of cost instances.
-                weights_2d = jax.vmap(stacked_cost.irls_weight_fn)(
+                # Call with the full group residuals so the weight function can
+                # estimate scale adaptively (e.g. via MAD) across all instances.
+                weights_2d = stacked_cost.irls_weight_fn(
                     residual_2d
                 )  # (count, residual_flat_dim)
                 weights = weights_2d.reshape((-1,))  # (count * residual_flat_dim,)

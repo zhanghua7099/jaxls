@@ -133,25 +133,37 @@ class Cost[*Args]:
     """Optional IRLS (Iteratively Reweighted Least Squares) weight function.
 
     If provided, this function is called at each solver iteration with the
-    current per-instance residual vector and should return per-element
-    non-negative weights. The solver then minimizes the *weighted* squared
-    residuals ``sum_i w_i * r_i^2`` rather than the unweighted sum.
+    **full group** of residuals and should return per-element non-negative
+    weights.  The solver then minimizes the *weighted* squared residuals
+    ``sum_i w_i * r_i^2`` rather than the unweighted sum.
 
     Signature::
 
-        weight_fn(residual: jax.Array) -> jax.Array
+        weight_fn(residuals: jax.Array) -> jax.Array
 
-    where ``residual`` has shape ``(residual_dim,)`` (for a single cost
-    instance) and the returned array has the same shape with non-negative
-    values.  The function is automatically vmapped over batched cost groups.
+    where ``residuals`` has shape ``(count, residual_flat_dim)`` (all
+    instances in the cost group) and the returned array has the same shape
+    with non-negative values.
+
+    Receiving the full group of residuals allows the weight function to
+    estimate the noise scale adaptively at every iteration (e.g. via the
+    Median Absolute Deviation) before computing the per-element weights.
 
     Built-in factory functions for common M-estimators can be found in
     :mod:`jaxls.utils`:
+
+    *Fixed-scale (threshold supplied by the user):*
 
     - :func:`~jaxls.utils.irls_huber`
     - :func:`~jaxls.utils.irls_cauchy`
     - :func:`~jaxls.utils.irls_tukey`
     - :func:`~jaxls.utils.irls_l1`
+
+    *Adaptive-scale (σ estimated from current residuals via MAD):*
+
+    - :func:`~jaxls.utils.irls_huber_adaptive`
+    - :func:`~jaxls.utils.irls_cauchy_adaptive`
+    - :func:`~jaxls.utils.irls_tukey_adaptive`
     """
 
     name: jdc.Static[str | None] = None

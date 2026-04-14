@@ -381,7 +381,7 @@ class AnalyzedLeastSquaresProblem:
                 jac_caches.append(None)
 
             if stacked_cost.irls_weight_fn is not None:
-                weights_2d = jax.vmap(stacked_cost.irls_weight_fn)(residual_2d)
+                weights_2d = stacked_cost.irls_weight_fn(residual_2d)
                 weights = weights_2d.reshape((-1,))
                 irls_weights_list.append(weights)
 
