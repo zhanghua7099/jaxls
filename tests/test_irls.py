@@ -302,3 +302,163 @@ def test_irls_weight_fn_none_noop():
     vals_l2 = problem_l2.solve(verbose=False)
 
     assert jnp.allclose(vals_none[var], vals_l2[var], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Tests for Geman-McClure weight functions
+# ---------------------------------------------------------------------------
+
+
+def test_irls_geman_mcclure_weights():
+    r = jnp.array([[0.0, 1.0, 5.0]])  # (1, 3)
+    w = jaxls.utils.irls_geman_mcclure(c=1.0)(r)
+    assert w.shape == r.shape
+    # Monotonically decreasing with |r|
+    assert float(w[0, 0]) >= float(w[0, 1]) >= float(w[0, 2])
+    # At r=0, weight should be 1
+    assert jnp.allclose(w[0, 0], jnp.array(1.0))
+    # Exact value: 1/(1+r^2)^2
+    expected_at_1 = 1.0 / (1.0 + 1.0) ** 2  # 0.25
+    assert jnp.allclose(w[0, 1], jnp.array(expected_at_1), atol=1e-5)
+
+
+def test_irls_geman_mcclure_adaptive_weights_shape():
+    r = jnp.array([[0.0, 0.5, 2.0], [1.0, 3.0, 0.1]])  # (2, 3)
+    w = jaxls.utils.irls_geman_mcclure_adaptive(k=3.0)(r)
+    assert w.shape == r.shape
+    assert jnp.all(w > 0)
+
+
+def test_irls_geman_mcclure_adaptive_robust_to_outliers():
+    """Adaptive Geman-McClure should reject outliers."""
+    clean = jnp.zeros(9)
+    outlier = jnp.array([100.0])
+    observations = jnp.concatenate([clean, outlier])
+
+    var = ScalarVar(0)
+    problem_irls = _make_scalar_problem(
+        observations, irls_weight_fn=jaxls.utils.irls_geman_mcclure_adaptive()
+    )
+    vals_irls = problem_irls.solve(verbose=False)
+    irls_estimate = float(vals_irls[var])
+
+    assert abs(irls_estimate - 0.0) < 1.0, (
+        f"Expected adaptive Geman-McClure IRLS estimate close to 0.0, got {irls_estimate}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for Welsh weight functions
+# ---------------------------------------------------------------------------
+
+
+def test_irls_welsh_weights():
+    r = jnp.array([[0.0, 1.0, 5.0]])  # (1, 3)
+    w = jaxls.utils.irls_welsh(c=1.0)(r)
+    assert w.shape == r.shape
+    # Monotonically decreasing with |r|
+    assert float(w[0, 0]) >= float(w[0, 1]) >= float(w[0, 2])
+    # At r=0, weight should be 1
+    assert jnp.allclose(w[0, 0], jnp.array(1.0))
+    # Exact value: exp(-r^2)
+    expected_at_1 = float(jnp.exp(jnp.array(-1.0)))
+    assert jnp.allclose(w[0, 1], jnp.array(expected_at_1), atol=1e-5)
+
+
+def test_irls_welsh_adaptive_weights_shape():
+    r = jnp.array([[0.0, 0.5, 2.0], [1.0, 3.0, 0.1]])  # (2, 3)
+    w = jaxls.utils.irls_welsh_adaptive(k=2.985)(r)
+    assert w.shape == r.shape
+    assert jnp.all(w > 0)
+
+
+def test_irls_welsh_adaptive_robust_to_outliers():
+    """Adaptive Welsh should reject outliers."""
+    clean = jnp.zeros(9)
+    outlier = jnp.array([100.0])
+    observations = jnp.concatenate([clean, outlier])
+
+    var = ScalarVar(0)
+    problem_irls = _make_scalar_problem(
+        observations, irls_weight_fn=jaxls.utils.irls_welsh_adaptive()
+    )
+    vals_irls = problem_irls.solve(verbose=False)
+    irls_estimate = float(vals_irls[var])
+
+    assert abs(irls_estimate - 0.0) < 1.0, (
+        f"Expected adaptive Welsh IRLS estimate close to 0.0, got {irls_estimate}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for L_p weight functions
+# ---------------------------------------------------------------------------
+
+
+def test_irls_lp_weights():
+    r = jnp.array([[0.5, 1.0, 2.0]])  # (1, 3)
+    p = 1.2
+    eps = 1e-6
+    w = jaxls.utils.irls_lp(p=p, eps=eps)(r)
+    assert w.shape == r.shape
+    # For p < 2, larger residuals get smaller weights
+    assert float(w[0, 0]) > float(w[0, 1]) > float(w[0, 2])
+
+
+def test_irls_lp_p2_equivalent():
+    """With p=2, L_p weights should all be ~1, recovering standard L2."""
+    observations = jnp.array([1.0, 2.0, 3.0])
+    problem_lp = _make_scalar_problem(
+        observations,
+        irls_weight_fn=jaxls.utils.irls_lp(p=2.0),
+    )
+    problem_l2 = _make_scalar_problem(observations)
+
+    var = ScalarVar(0)
+    vals_lp = problem_lp.solve(verbose=False)
+    vals_l2 = problem_l2.solve(verbose=False)
+
+    assert jnp.allclose(vals_lp[var], vals_l2[var], atol=1e-3)
+
+
+def test_irls_lp_adaptive_weights_shape():
+    r = jnp.array([[0.0, 0.5, 2.0], [1.0, 3.0, 0.1]])  # (2, 3)
+    w = jaxls.utils.irls_lp_adaptive(p=1.2)(r)
+    assert w.shape == r.shape
+    assert jnp.all(w > 0)
+
+
+def test_irls_lp_adaptive_robust_to_outliers():
+    """Adaptive L_p (p=1.0) should approximate L1 and reject outliers."""
+    clean = jnp.zeros(9)
+    outlier = jnp.array([100.0])
+    observations = jnp.concatenate([clean, outlier])
+
+    var = ScalarVar(0)
+    problem_irls = _make_scalar_problem(
+        observations, irls_weight_fn=jaxls.utils.irls_lp_adaptive(p=1.0)
+    )
+    vals_irls = problem_irls.solve(verbose=False)
+    irls_estimate = float(vals_irls[var])
+
+    assert abs(irls_estimate - 0.0) < 1.0, (
+        f"Expected adaptive L_p IRLS estimate close to 0.0, got {irls_estimate}"
+    )
+
+
+def test_irls_adaptive_scale_invariance_all():
+    """All adaptive estimators should give same relative weights regardless of scale."""
+    r_small = jnp.array([[0.01, 0.01, 0.01, 0.01, 1.0]])
+    r_large = r_small * 100.0
+
+    for name, factory in [
+        ("geman_mcclure", jaxls.utils.irls_geman_mcclure_adaptive),
+        ("welsh", jaxls.utils.irls_welsh_adaptive),
+        ("lp", lambda: jaxls.utils.irls_lp_adaptive(p=1.2)),
+    ]:
+        fn = factory() if callable(factory) else factory
+        w_small = fn(r_small)
+        w_large = fn(r_large)
+        assert jnp.allclose(w_small, w_large, atol=1e-3), (
+            f"Adaptive {name} weights should be scale-invariant"
+        )

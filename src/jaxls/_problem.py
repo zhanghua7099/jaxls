@@ -51,13 +51,16 @@ class _CostInfo:
     """
 
     residual_vectors: tuple[jax.Array, ...]
-    """Per-group residual vectors (matches _stacked_costs structure)."""
+    """Per-group weighted residual vectors (matches _stacked_costs structure)."""
+
+    residual_vectors_unweighted: tuple[jax.Array, ...]
+    """Per-group unweighted residual vectors (before IRLS scaling)."""
 
     residual_vector: jax.Array
-    """Concatenated residual vector for linear algebra operations."""
+    """Concatenated weighted residual vector for linear algebra operations."""
 
     cost_total: jax.Array
-    """Total cost (sum of all squared residuals)."""
+    """Total cost (sum of all squared weighted residuals)."""
 
     cost_nonconstraint: jax.Array
     """Cost from l2_squared terms only (original objective, excludes constraint terms)."""
@@ -672,6 +675,7 @@ class AnalyzedLeastSquaresProblem:
             _CostInfo with all computed values.
         """
         residual_vectors: list[jax.Array] = []
+        residual_vectors_unweighted: list[jax.Array] = []
         jac_caches: list[Any] = []
         irls_weights_list: list[jax.Array | None] = []
         cost_nonconstraint = jnp.array(0.0)
@@ -691,6 +695,9 @@ class AnalyzedLeastSquaresProblem:
                 residual_2d = compute_residual_out  # (count, residual_flat_dim)
                 jac_caches.append(None)
 
+            residual_unweighted = residual_2d.reshape((-1,))
+            residual_vectors_unweighted.append(residual_unweighted)
+
             # Apply IRLS weights if specified.
             if stacked_cost.irls_weight_fn is not None:
                 # Call with the full group residuals so the weight function can
@@ -701,10 +708,10 @@ class AnalyzedLeastSquaresProblem:
                 weights = weights_2d.reshape((-1,))  # (count * residual_flat_dim,)
                 irls_weights_list.append(weights)
                 # Scale the residual: r_irls = sqrt(w) * r
-                residual = jnp.sqrt(weights) * residual_2d.reshape((-1,))
+                residual = jnp.sqrt(weights) * residual_unweighted
             else:
                 irls_weights_list.append(None)
-                residual = residual_2d.reshape((-1,))
+                residual = residual_unweighted
 
             residual_vectors.append(residual)
 
@@ -717,6 +724,7 @@ class AnalyzedLeastSquaresProblem:
 
         return _CostInfo(
             residual_vectors=tuple(residual_vectors),
+            residual_vectors_unweighted=tuple(residual_vectors_unweighted),
             residual_vector=residual_vector,
             cost_total=cost_total,
             cost_nonconstraint=cost_nonconstraint,

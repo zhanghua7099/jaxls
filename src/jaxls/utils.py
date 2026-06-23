@@ -306,6 +306,102 @@ def irls_l1(eps: float = 1e-6) -> Callable[[jax.Array], jax.Array]:
     return weight_fn
 
 
+def irls_geman_mcclure(c: float = 1.0) -> Callable[[jax.Array], jax.Array]:
+    """Return a Geman-McClure IRLS weight function with a **fixed** scale.
+
+    Produces weights corresponding to the Geman-McClure M-estimator loss
+    ``\\rho(r) = r^2 / (2 (1 + (r/c)^2))``:
+
+    .. math::
+
+        w_i = \\frac{1}{\\bigl(1 + (r_i / c)^2\\bigr)^2}
+
+    The Geman-McClure estimator provides very aggressive outlier rejection —
+    even more than Cauchy — because the weight decays as the *square* of the
+    Cauchy weight.  It is redescending (the influence function turns back
+    toward zero for large residuals).
+
+    Args:
+        c: Scale parameter.  Residuals much larger than ``c`` are strongly
+            down-weighted.  Default is ``1.0``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        def _per_instance(r: jax.Array) -> jax.Array:
+            return 1.0 / (1.0 + (r / c) ** 2) ** 2
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_welsh(c: float = 1.0) -> Callable[[jax.Array], jax.Array]:
+    """Return a Welsh IRLS weight function with a **fixed** scale.
+
+    Produces weights corresponding to the Welsh (Dennis–Welsch) M-estimator
+    loss ``\\rho(r) = c^2 / 2 \\cdot (1 - \\exp(-(r/c)^2))``:
+
+    .. math::
+
+        w_i = \\exp\\!\\bigl(-(r_i / c)^2\\bigr)
+
+    The Welsh estimator provides smooth, exponentially decaying weights.
+    Like Tukey it is redescending, but it never assigns exactly zero weight,
+    which can improve numerical stability.
+
+    Args:
+        c: Scale parameter.  Controls how quickly the weight decays with
+            residual magnitude.  Default is ``1.0``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        def _per_instance(r: jax.Array) -> jax.Array:
+            return jnp.exp(-(r / c) ** 2)
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_lp(p: float = 1.2, eps: float = 1e-6) -> Callable[[jax.Array], jax.Array]:
+    """Return an L_p-norm IRLS weight function with a **fixed** scale.
+
+    Produces weights that convert a least-squares solver into an approximate
+    L_p minimiser for ``0 < p < 2``:
+
+    .. math::
+
+        w_i = |r_i|^{p - 2}
+
+    When ``p = 2`` the weights are all 1 (standard L2).  As ``p`` decreases
+    toward 0, large residuals are down-weighted more aggressively.  ``p = 1``
+    recovers L1 (median-like) behaviour.
+
+    Args:
+        p: Exponent of the L_p norm.  Must satisfy ``0 < p <= 2``.
+            Default is ``1.2``.
+        eps: Small positive constant added to ``|r|`` for numerical stability
+            near zero.  Default is ``1e-6``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        def _per_instance(r: jax.Array) -> jax.Array:
+            return (jnp.abs(r) + eps) ** (p - 2)
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
 # ---------------------------------------------------------------------------
 # Adaptive-scale IRLS weight factories
 #
@@ -446,6 +542,139 @@ def irls_tukey_adaptive(
             u = r / sigma
             t = u / k
             return jnp.where(jnp.abs(t) <= 1.0, (1.0 - t ** 2) ** 2, jnp.zeros_like(t))
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_geman_mcclure_adaptive(
+    k: float = 3.0, eps: float = 1e-10
+) -> Callable[[jax.Array], jax.Array]:
+    """Return a Geman-McClure IRLS weight function with **adaptive** scale estimation.
+
+    At each solver iteration the noise scale σ is estimated via MAD:
+
+    .. math::
+
+        \\hat{\\sigma} = \\frac{\\operatorname{median}(|r|)}{0.6745}
+
+    Weights are computed from scale-normalised residuals ``u = r / σ``:
+
+    .. math::
+
+        w_i = \\frac{1}{\\bigl(1 + (u_i / k)^2\\bigr)^2}
+
+    The Geman-McClure weight decays as the *square* of the Cauchy weight,
+    giving very aggressive outlier rejection.  The influence function is
+    redescending: it turns back toward zero for large residuals.
+
+    Args:
+        k: Tuning constant (multiples of σ).  Default is ``3.0``.
+        eps: Small constant for numerical stability in σ estimation.
+            Default is ``1e-10``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        sigma = jnp.median(jnp.abs(residuals.flatten())) / _MAD_CONSISTENCY_FACTOR
+        sigma = jnp.maximum(sigma, eps)
+
+        def _per_instance(r: jax.Array) -> jax.Array:
+            u = r / sigma
+            return 1.0 / (1.0 + (u / k) ** 2) ** 2
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_welsh_adaptive(
+    k: float = 2.985, eps: float = 1e-10
+) -> Callable[[jax.Array], jax.Array]:
+    """Return a Welsh IRLS weight function with **adaptive** scale estimation.
+
+    At each solver iteration the noise scale σ is estimated via MAD:
+
+    .. math::
+
+        \\hat{\\sigma} = \\frac{\\operatorname{median}(|r|)}{0.6745}
+
+    Weights are computed from scale-normalised residuals ``u = r / σ``:
+
+    .. math::
+
+        w_i = \\exp\\!\\bigl(-(u_i / k)^2\\bigr)
+
+    The Welsh (Dennis–Welsch) estimator provides smooth, exponentially
+    decaying weights.  Like Tukey it is redescending, but it never assigns
+    exactly zero weight, which can improve numerical stability.
+
+    The default ``k = 2.985`` gives 95 % asymptotic efficiency under
+    Gaussian noise.
+
+    Args:
+        k: Tuning constant (multiples of σ).  Default is ``2.985``.
+        eps: Small constant for numerical stability in σ estimation.
+            Default is ``1e-10``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        sigma = jnp.median(jnp.abs(residuals.flatten())) / _MAD_CONSISTENCY_FACTOR
+        sigma = jnp.maximum(sigma, eps)
+
+        def _per_instance(r: jax.Array) -> jax.Array:
+            u = r / sigma
+            return jnp.exp(-(u / k) ** 2)
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_lp_adaptive(
+    p: float = 1.2, eps: float = 1e-6
+) -> Callable[[jax.Array], jax.Array]:
+    """Return an L_p-norm IRLS weight function with **adaptive** scale estimation.
+
+    At each solver iteration the noise scale σ is estimated via MAD:
+
+    .. math::
+
+        \\hat{\\sigma} = \\frac{\\operatorname{median}(|r|)}{0.6745}
+
+    Weights are computed from scale-normalised residuals ``u = r / σ``:
+
+    .. math::
+
+        w_i = |u_i|^{p - 2}
+
+    When ``p = 2`` the weights are all 1 (standard L2).  As ``p`` decreases
+    toward 0, large residuals are down-weighted more aggressively.  ``p = 1``
+    recovers L1 (median-like) behaviour.
+
+    Args:
+        p: Exponent of the L_p norm.  Must satisfy ``0 < p <= 2``.
+            Default is ``1.2``.
+        eps: Small positive constant added to ``|u|`` for numerical stability
+            near zero.  Default is ``1e-6``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        sigma = jnp.median(jnp.abs(residuals.flatten())) / _MAD_CONSISTENCY_FACTOR
+        sigma = jnp.maximum(sigma, eps)
+
+        def _per_instance(r: jax.Array) -> jax.Array:
+            u = jnp.abs(r) / sigma
+            return (u + eps) ** (p - 2)
 
         return jax.vmap(_per_instance)(residuals)
 

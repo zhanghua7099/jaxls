@@ -57,6 +57,26 @@ if TYPE_CHECKING:
 _cholmod_analyze_cache: dict[Hashable, sksparse.cholmod.Factor] = {}
 
 
+def _compute_cost_with_weights(
+    residual_vectors_unweighted: tuple[jax.Array, ...],
+    irls_weights: tuple[jax.Array | None, ...],
+) -> jax.Array:
+    """Compute total cost from unweighted residuals and given IRLS weights.
+
+    This evaluates ``sum_i w_i * r_i^2`` using the provided weights rather
+    than the weights stored alongside the residuals, enabling a fair
+    cost comparison when IRLS weights change between iterations (e.g.
+    adaptive scale estimation).
+    """
+    cost = jnp.array(0.0)
+    for r, w in zip(residual_vectors_unweighted, irls_weights):
+        if w is not None:
+            cost = cost + jnp.sum(w * r**2)
+        else:
+            cost = cost + jnp.sum(r**2)
+    return cost
+
+
 def _cholmod_solve(
     A: SparseCsrMatrix, ATb: jax.Array, lambd: float | jax.Array
 ) -> jax.Array:
@@ -815,8 +835,18 @@ class NonlinearSolver:
             predicted_reduction = 2.0 * jnp.dot(local_delta, ATb) - jnp.sum(
                 A_blocksparse.multiply(local_delta) ** 2
             )
+            # Use consistent IRLS weights for a fair comparison: evaluate
+            # proposed residuals with the SAME weights that produced
+            # sol_prev.cost_info.cost_total.  For adaptive IRLS the scale
+            # estimate (e.g. MAD) changes with the residuals, so comparing
+            # costs from different weight functions is unreliable and causes
+            # spurious step rejections / lambda blowup.
+            proposed_cost_consistent = _compute_cost_with_weights(
+                proposed_cost_info.residual_vectors_unweighted,
+                sol_prev.cost_info.irls_weights,
+            )
             actual_reduction = (
-                sol_prev.cost_info.cost_total - proposed_cost_info.cost_total
+                sol_prev.cost_info.cost_total - proposed_cost_consistent
             )
             step_quality = actual_reduction / predicted_reduction
             accepted = ~jnp.isnan(proposed_cost_info.cost_total) & (

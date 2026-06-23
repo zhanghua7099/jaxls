@@ -39,6 +39,19 @@ from .utils import _log, jax_log, tikhonov_floor
 _cholmod_analyze_cache: Any = {}
 
 
+def _compute_cost_with_weights(
+    residual_vectors_unweighted: Any,
+    irls_weights: Any,
+) -> Any:
+    cost = jnp.array(0.0)
+    for r, w in zip(residual_vectors_unweighted, irls_weights):
+        if w is not None:
+            cost = cost + jnp.sum(w * r**2)
+        else:
+            cost = cost + jnp.sum(r**2)
+    return cost
+
+
 def _cholmod_solve(A: Any, ATb: Any, lambd: Any) -> Any:
     return jax.pure_callback(
         _cholmod_solve_on_host,
@@ -531,8 +544,12 @@ class NonlinearSolver:
             predicted_reduction = 2.0 * jnp.dot(local_delta, ATb) - jnp.sum(
                 A_blocksparse.multiply(local_delta) ** 2
             )
+            proposed_cost_consistent = _compute_cost_with_weights(
+                proposed_cost_info.residual_vectors_unweighted,
+                sol_prev.cost_info.irls_weights,
+            )
             actual_reduction = (
-                sol_prev.cost_info.cost_total - proposed_cost_info.cost_total
+                sol_prev.cost_info.cost_total - proposed_cost_consistent
             )
             step_quality = actual_reduction / predicted_reduction
             accepted = ~jnp.isnan(proposed_cost_info.cost_total) & (
