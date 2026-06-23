@@ -1,13 +1,31 @@
-from typing import Any
 import contextlib
 import inspect
 import time
 from functools import partial
+from typing import Any
 
 import jax
+import numpy as onp
 import termcolor
 from jax import numpy as jnp
 from loguru import logger
+
+
+def tikhonov_floor(dtype: Any) -> Any:
+    eps = float(onp.finfo(dtype).eps)
+    return eps * (2e4 if onp.dtype(dtype) == onp.float32 else 4.0)
+
+
+def _batched_gram(a: Any, b: Any) -> Any:
+    return jnp.sum(a[..., :, :, None] * b[..., :, None, :], axis=-3)
+
+
+def _batched_outer_last(a: Any, b: Any) -> Any:
+    return jnp.sum(a[..., :, None, :] * b[..., None, :, :], axis=-1)
+
+
+def _batched_matmul(a: Any, b: Any) -> Any:
+    return jnp.sum(a[..., :, :, None] * b[..., None, :, :], axis=-2)
 
 
 @contextlib.contextmanager

@@ -26,8 +26,8 @@ classifiers = [
     "Operating System :: OS Independent"
 ]
 dependencies = [
-    "jax>=0.4.0",
-    "jaxlib",
+    "jax>=0.6.0",
+    "jaxlib>=0.6.0",
     "jaxlie>=1.0.0",
     "jax_dataclasses>=1.6.2",
     "loguru",
@@ -68,6 +68,11 @@ docs = [
     "viser>=1.0.19",
 ]
 cholmod = ["scikit-sparse"]
+# Docs plus a CUDA-enabled jaxlib, so the docs build executes notebooks on the
+# GPU (the default `docs` extra is CPU-only and portable for CI / GPU-less
+# machines). Use with serial notebook execution (nb_execution_parallel = 1 in
+# conf.py) so concurrent notebooks don't contend for or OOM the GPU.
+docs-gpu = ["jaxls[docs]", "jax[cuda12]"]
 
 [project.urls]
 "GitHub" = "https://github.com/brentyi/jaxls"

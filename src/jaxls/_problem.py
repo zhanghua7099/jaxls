@@ -21,6 +21,7 @@ from loguru import logger
 
 from ._analyzed_cost import _AnalyzedCost, _augment_constraint_cost
 from ._cost import Cost, CostKind, CustomJacobianCache
+from ._schur import EliminationPlan
 from ._solvers import (
     ConjugateGradientConfig,
     NonlinearSolver,
@@ -153,7 +154,11 @@ class LeastSquaresProblem:
             max_variables=max_variables,
         )
 
-    def analyze(self, use_onp: bool = False) -> AnalyzedLeastSquaresProblem:
+    def analyze(
+        self,
+        use_onp: bool = False,
+        schur_elimination: Literal["auto", "off"] | tuple[type[Var], ...] = "auto",
+    ) -> AnalyzedLeastSquaresProblem:
         """Analyze sparsity pattern of least squares problem. Needed before solving.
 
         Processes all costs and variables to compute the sparse Jacobian structure,
@@ -162,6 +167,37 @@ class LeastSquaresProblem:
         Args:
             use_onp: If True, use numpy instead of jax.numpy for index computations.
                 Can be faster for problem setup on CPU.
+            schur_elimination: Controls Schur-complement variable elimination.
+                When a dominant block-diagonal variable type is eliminated (for
+                example, landmarks in bundle adjustment), solves run on the much
+                smaller, better-conditioned reduced system and then
+                back-substitute the eliminated variables. Every ``linear_solver``
+                applies elimination, differing only in how it solves the reduced
+                system: "dense_cholesky" factors it densely, "conjugate_gradient"
+                solves it matrix-free, and "cholmod" factors it sparse-directly.
+
+                - ``"auto"`` (default): automatically eliminate a dominant
+                  block-diagonal variable type if one exists, otherwise solve
+                  the full system.
+                - ``"off"``: skip elimination and solve the full system.
+                  Useful for debugging or benchmarking against the
+                  non-eliminated solve.
+                - a tuple of variable types, e.g. ``(LandmarkVar,)``: eliminate
+                  exactly these types. Each must be block-diagonal (no single
+                  cost may touch more than one variable of the type), or
+                  building the plan raises a ``ValueError``.
+
+                Only a single level of elimination is currently supported: the
+                eliminated types are removed in one Schur step and the remaining
+                types form the reduced system. (Nested / multi-level elimination,
+                eliminating further types from the already-reduced system, is
+                not implemented.)
+
+                When no cost couples two variables the whole Hessian is
+                block-diagonal, and ``"auto"`` eliminates every type: the
+                reduced system is then empty and the step is an exact
+                per-variable blockwise inverse, so the ``linear_solver`` choice
+                has no effect.
 
         Returns:
             An AnalyzedLeastSquaresProblem ready for solving.
@@ -382,7 +418,7 @@ class LeastSquaresProblem:
             shape=(residual_dim_sum, tangent_dim_sum),
         )
 
-        return AnalyzedLeastSquaresProblem(
+        analyzed = AnalyzedLeastSquaresProblem(
             _stacked_costs=tuple(stacked_costs),
             _cost_counts=tuple(cost_counts),
             _sorted_ids_from_var_type=sorted_ids_from_var_type,
@@ -393,6 +429,58 @@ class LeastSquaresProblem:
             _tangent_dim=tangent_dim_sum,
             _residual_dim=residual_dim_sum,
         )
+
+        # Precompute the Schur-complement elimination plan when a dominant
+        # block-diagonal variable type exists (for example, landmarks in
+        # bundle adjustment). This is host-side index structure that depends
+        # only on the problem's sparsity, so it belongs with the rest of the
+        # analysis; `solve()` decides whether to use it.
+        from ._schur import (
+            _TracedVariableIdsError,
+            build_elimination_plan,
+            infer_eliminate,
+        )
+
+        if schur_elimination == "auto":
+            eliminate = infer_eliminate(analyzed)
+        elif schur_elimination == "off":
+            eliminate = ()
+        elif isinstance(schur_elimination, tuple):
+            eliminate = schur_elimination
+        else:
+            raise ValueError(
+                "schur_elimination must be 'auto', 'off', or a tuple of "
+                f"variable types; got {schur_elimination!r}."
+            )
+        if len(eliminate) > 0:
+            try:
+                elimination = build_elimination_plan(analyzed, eliminate)
+            except _TracedVariableIdsError:
+                # Variable IDs are tracers (analyze() itself is being
+                # traced); solves will run without elimination.
+                logger.info(
+                    "Variable elimination: variable IDs are traced; solves "
+                    "will not use elimination"
+                )
+            else:
+                logger.info(
+                    "Variable elimination: eliminating {} ({} of {} tangent "
+                    "dims); reduced system is {}-dimensional",
+                    ", ".join(var_type.__name__ for var_type in eliminate),
+                    analyzed._tangent_dim - elimination.reduced_dim,
+                    analyzed._tangent_dim,
+                    elimination.reduced_dim,
+                )
+                if elimination.reduced_dim == 0:
+                    logger.info(
+                        "Variable elimination: every type was eliminated, so "
+                        "the Hessian is fully block-diagonal; the step is an "
+                        "exact blockwise inverse and the linear_solver choice "
+                        "is ignored."
+                    )
+                with jdc.copy_and_mutate(analyzed, validate=False) as analyzed:
+                    analyzed._elimination = elimination
+        return analyzed
 
 
 @jdc.pytree_dataclass
@@ -408,6 +496,11 @@ class AnalyzedLeastSquaresProblem:
     _tangent_start_from_var_type: jdc.Static[dict[type[Var[Any]], int]]
     _tangent_dim: jdc.Static[int]
     _residual_dim: jdc.Static[int]
+    _elimination: EliminationPlan | None = None
+    """Schur-complement elimination plan, precomputed by `analyze()` when a
+    dominant block-diagonal variable type is eliminated. Used by `solve()` for
+    all reduced-solve paths (dense Cholesky, CG, and CHOLMOD); None when
+    `analyze(schur_elimination="off")` or no type was eliminated."""
 
     @overload
     def solve(
@@ -460,7 +553,16 @@ class AnalyzedLeastSquaresProblem:
 
         Args:
             initial_vals: Initial values for the variables. If None, default values will be used.
-            linear_solver: The linear solver to use.
+            linear_solver: The linear solver to use. When a dominant
+                block-diagonal variable type exists (for example, landmarks
+                in bundle adjustment), all three solvers automatically
+                eliminate it via the Schur complement and run on the much
+                smaller, better-conditioned reduced system; the decision is
+                logged. They differ only in how they solve that reduced
+                system: "conjugate_gradient" matrix-free, "dense_cholesky"
+                dense, and "cholmod" sparse-direct. See
+                :meth:`LeastSquaresProblem.analyze` to control or disable
+                elimination.
             trust_region: Configuration for Levenberg-Marquardt trust region.
             termination: Configuration for termination criteria.
             sparse_mode: The representation to use for sparse matrix
@@ -498,6 +600,27 @@ class AnalyzedLeastSquaresProblem:
             conjugate_gradient_config = linear_solver
             linear_solver = "conjugate_gradient"
 
+        # Schur-complement variable elimination: the plan was precomputed by
+        # `analyze()` when a dominant block-diagonal variable type exists
+        # (for example, landmarks in bundle adjustment); the linear solves
+        # then run on the much smaller, better-conditioned reduced system and
+        # back-substitute the eliminated variables. All three reduced-solve
+        # paths are supported: dense Cholesky, matrix-free CG, and CHOLMOD
+        # (sparse-direct on the reduced system, the Ceres/g2o combination).
+        elimination = self._elimination
+
+        # If every type was eliminated (a fully block-diagonal Hessian), the
+        # reduced system is empty and the step is an exact blockwise inverse, so
+        # `linear_solver` has no effect. Note it at the call site (the analyze()
+        # log says the same, but the user passes `linear_solver` here).
+        if verbose and elimination is not None and elimination.reduced_dim == 0:
+            logger.info(
+                "The Hessian is fully block-diagonal (every variable type was "
+                "eliminated), so linear_solver={!r} is ignored; the step is "
+                "solved by exact blockwise inversion.",
+                linear_solver,
+            )
+
         # Create unified solver (handles both constrained and unconstrained).
         solver = NonlinearSolver(
             linear_solver,
@@ -507,6 +630,7 @@ class AnalyzedLeastSquaresProblem:
             sparse_mode,
             verbose,
             augmented_lagrangian if has_constraints else None,
+            elimination,
         )
         return solver.solve(
             problem=self, initial_vals=initial_vals, return_summary=return_summary
@@ -808,6 +932,7 @@ class AnalyzedLeastSquaresProblem:
             vals: Variable values at which to compute covariance (typically
                 the solution from solve()).
             method: Covariance computation method. Options:
+
                 - None (default): Use CG with block-Jacobi preconditioning.
                   GPU-friendly and adapts to problem structure.
                 - LinearSolverCovarianceEstimatorConfig: Custom linear solver config.
