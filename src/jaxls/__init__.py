@@ -7,6 +7,9 @@ if TYPE_CHECKING or sys.version_info >= (3, 12):
         AugmentedLagrangianConfig as AugmentedLagrangianConfig,
     )
     from ._cost import Cost as Cost
+    from ._gnc import GNCConfig as GNCConfig
+    from ._gnc import GNCSummary as GNCSummary
+    from ._gnc import gnc_solve as gnc_solve
     from ._covariance import CovarianceEstimator as CovarianceEstimator
     from ._covariance import (
         LinearSolverCovarianceEstimatorConfig as LinearSolverCovarianceEstimatorConfig,
@@ -30,6 +33,9 @@ elif sys.version_info >= (3, 10):
         AugmentedLagrangianConfig as AugmentedLagrangianConfig,
     )
     from ._py310._cost import Cost as Cost
+    from ._gnc import GNCConfig as GNCConfig
+    from ._gnc import GNCSummary as GNCSummary
+    from ._gnc import gnc_solve as gnc_solve
     from ._py310._covariance import CovarianceEstimator as CovarianceEstimator
     from ._py310._covariance import (
         LinearSolverCovarianceEstimatorConfig as LinearSolverCovarianceEstimatorConfig,

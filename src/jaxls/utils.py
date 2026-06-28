@@ -279,6 +279,41 @@ def irls_tukey(c: float = 4.685) -> Callable[[jax.Array], jax.Array]:
     return weight_fn
 
 
+def irls_tls(c: float = 1.0) -> Callable[[jax.Array], jax.Array]:
+    """Return a Truncated Least Squares (TLS) IRLS weight function with a **fixed** scale.
+
+    Produces binary weights that completely accept or reject residuals:
+
+    .. math::
+
+        w_i = \\begin{cases}1 & |r_i| \\le c \\\\ 0 & |r_i| > c\\end{cases}
+
+    This is the hardest possible outlier rejection: residuals beyond
+    the threshold ``c`` are entirely ignored.  Unlike Tukey bisquare,
+    there is no smooth transition — the weight jumps discontinuously
+    from 1 to 0.
+
+    .. note::
+
+        ``c`` is an absolute scale value.  See :func:`irls_tls_adaptive`
+        for automatic scale estimation from the data.
+
+    Args:
+        c: Threshold beyond which residuals are ignored.  Default is ``1.0``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        def _per_instance(r: jax.Array) -> jax.Array:
+            return jnp.where(jnp.abs(r) <= c, jnp.ones_like(r), jnp.zeros_like(r))
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
 def irls_l1(eps: float = 1e-6) -> Callable[[jax.Array], jax.Array]:
     """Return an L1-norm IRLS weight function.
 
@@ -542,6 +577,47 @@ def irls_tukey_adaptive(
             u = r / sigma
             t = u / k
             return jnp.where(jnp.abs(t) <= 1.0, (1.0 - t ** 2) ** 2, jnp.zeros_like(t))
+
+        return jax.vmap(_per_instance)(residuals)
+
+    return weight_fn
+
+
+def irls_tls_adaptive(
+    k: float = 3.0, eps: float = 1e-10
+) -> Callable[[jax.Array], jax.Array]:
+    """Return a Truncated Least Squares IRLS weight function with **adaptive** scale estimation.
+
+    At each solver iteration the noise scale σ is estimated via MAD:
+
+    .. math::
+
+        \\hat{\\sigma} = \\frac{\\operatorname{median}(|r|)}{0.6745}
+
+    Weights are binary based on scale-normalised residuals ``u = r / σ``:
+
+    .. math::
+
+        w_i = \\begin{cases}1 & |u_i| \\le k \\\\ 0 & |u_i| > k\\end{cases}
+
+    The default ``k = 3.0`` corresponds to a ~3σ threshold.
+
+    Args:
+        k: Tuning constant (multiples of σ).  Default is ``3.0``.
+        eps: Small constant for numerical stability in σ estimation.
+            Default is ``1e-10``.
+
+    Returns:
+        A callable ``weight_fn(residuals) -> weights`` suitable for
+        :attr:`~jaxls.Cost.irls_weight_fn`.
+    """
+    def weight_fn(residuals: jax.Array) -> jax.Array:
+        sigma = jnp.median(jnp.abs(residuals.flatten())) / _MAD_CONSISTENCY_FACTOR
+        sigma = jnp.maximum(sigma, eps)
+
+        def _per_instance(r: jax.Array) -> jax.Array:
+            u = jnp.abs(r) / sigma
+            return jnp.where(u <= k, jnp.ones_like(r), jnp.zeros_like(r))
 
         return jax.vmap(_per_instance)(residuals)
 
